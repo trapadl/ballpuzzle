@@ -2,14 +2,414 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Calm Sort</title>
-    <link rel="stylesheet" href="style.css">
-    <!-- Third-party libraries -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minimalist ASMR Puzzle Game</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+    <!-- Library Imports from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.17.1/matter.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
 </head>
 <body>
-    <canvas id="game-canvas"></canvas>
-    <script type="module" src="main.js"></script>
+    <script>
+        // --- Matter.js Aliases ---
+        const { Engine, Render, Runner, World, Bodies, Body, Events, Mouse, MouseConstraint } = Matter;
+
+        // --- Game Configuration ---
+        const TUBE_COUNT = 5;
+        const BALLS_PER_COLOR = 4;
+        const TUBE_CAPACITY = 4;
+        const COLORS = [
+            '#FFCDB2', // Soft Peach
+            '#FFB4A2', // Coral Pink
+            '#E5989B', // Muted Rose
+            '#B5838D', // Dusty Mauve
+        ];
+        
+        // --- p5.js Sketch ---
+        let engine;
+        let world;
+        let balls = [];
+        let tubes = [];
+        let boundaries = [];
+        let mouseConstraint;
+
+        // --- Audio (Tone.js) ---
+        let audioStarted = false;
+        let collisionSound;
+        let victorySound;
+        let ambientLoop;
+
+        // --- Game State ---
+        let gameWon = false;
+        let draggedBall = null;
+
+        function setup() {
+            let canvas = createCanvas(windowWidth, windowHeight);
+            
+            // --- Initialize Physics ---
+            engine = Engine.create();
+            world = engine.world;
+            engine.world.gravity.y = 1;
+
+            // --- Initialize Audio ---
+            setupAudio();
+
+            // --- Create Game Elements ---
+            const tubeWidth = 60;
+            const tubeHeight = 240;
+            const tubeSpacing = 80;
+            const totalWidth = TUBE_COUNT * (tubeWidth + tubeSpacing) - tubeSpacing;
+            const startX = (width - totalWidth) / 2;
+            const tubeY = height / 2 + 50;
+
+            // Create Tubes (visual and physical boundaries)
+            for (let i = 0; i < TUBE_COUNT; i++) {
+                const x = startX + i * (tubeWidth + tubeSpacing);
+                tubes.push({
+                    x: x,
+                    y: tubeY,
+                    width: tubeWidth,
+                    height: tubeHeight,
+                    balls: []
+                });
+                
+                // Add static walls for each tube to contain balls
+                const wallThickness = 10;
+                World.add(world, [
+                    Bodies.rectangle(x - tubeWidth / 2, tubeY, wallThickness, tubeHeight, { isStatic: true, render: { visible: false } }),
+                    Bodies.rectangle(x + tubeWidth / 2, tubeY, wallThickness, tubeHeight, { isStatic: true, render: { visible: false } })
+                ]);
+            }
+            
+            // Create Ground and Walls
+            boundaries.push(Bodies.rectangle(width / 2, height, width, 50, { isStatic: true, render: { visible: false } })); // Floor
+            boundaries.push(Bodies.rectangle(0, height/2, 50, height, { isStatic: true, render: { visible: false } })); // Left Wall
+            boundaries.push(Bodies.rectangle(width, height/2, 50, height, { isStatic: true, render: { visible: false } })); // Right Wall
+            World.add(world, boundaries);
+
+            // Create and Distribute Balls
+            let initialBalls = [];
+            for (let i = 0; i < COLORS.length; i++) {
+                for (let j = 0; j < BALLS_PER_COLOR; j++) {
+                    initialBalls.push(COLORS[i]);
+                }
+            }
+            // Shuffle and place in first tubes
+            initialBalls.sort(() => 0.5 - Math.random()); 
+
+            for (let i = 0; i < TUBE_COUNT - 1; i++) {
+                for (let j = 0; j < TUBE_CAPACITY; j++) {
+                    const color = initialBalls.pop();
+                    if (!color) continue;
+                    
+                    const ballRadius = tubeWidth/2 * 0.7;
+                    const tube = tubes[i];
+                    const x = tube.x;
+                    const y = tube.y + tube.height / 2 - ballRadius - j * (ballRadius * 2.1);
+                    
+                    const ball = Bodies.circle(x, y, ballRadius, {
+                        restitution: 0.4, // Gentle bounce
+                        friction: 0.1,
+                        label: 'ball',
+                        render: {
+                            fillStyle: color
+                        }
+                    });
+                    ball.color = color;
+                    balls.push(ball);
+                    tube.balls.push(ball);
+                }
+            }
+            World.add(world, balls);
+
+            // --- Setup Mouse Interaction ---
+            const mouse = Mouse.create(canvas.elt);
+            mouse.pixelRatio = pixelDensity();
+            mouseConstraint = MouseConstraint.create(engine, {
+                mouse: mouse,
+                constraint: {
+                    stiffness: 0.1, // Gives the soft, laggy drag effect
+                    render: {
+                        visible: false
+                    }
+                }
+            });
+            World.add(world, mouseConstraint);
+            
+            // --- Event Listeners ---
+            // Listen for start of drag to only pick top balls
+            Events.on(mouseConstraint, 'startdrag', (event) => {
+                const body = event.body;
+                if (body.label === 'ball') {
+                    const tube = getTubeOfBall(body);
+                    if (tube && isTopBall(body, tube)) {
+                        draggedBall = body;
+                    } else {
+                        // Prevent dragging if not the top ball
+                        mouseConstraint.body = null; 
+                        draggedBall = null;
+                    }
+                }
+            });
+
+            // Listen for end of drag to apply sorting logic
+            Events.on(mouseConstraint, 'enddrag', (event) => {
+                if (!draggedBall) return;
+
+                const targetTube = getTubeUnderMouse();
+                if (targetTube) {
+                    const topBall = getTopBallInTube(targetTube);
+                    const isMoveValid = !topBall || topBall.color === draggedBall.color;
+                    
+                    if (isMoveValid && targetTube.balls.length < TUBE_CAPACITY) {
+                        // Valid move, physics will handle the drop.
+                        // We just update our logical representation.
+                        const oldTube = getTubeOfBall(draggedBall);
+                        if(oldTube) oldTube.balls.pop();
+                        targetTube.balls.push(draggedBall);
+                    } else {
+                        // Invalid move, ball will fall to the ground.
+                        const oldTube = getTubeOfBall(draggedBall);
+                        if(oldTube) oldTube.balls.pop();
+                    }
+                } else {
+                    // Dropped outside any tube
+                    const oldTube = getTubeOfBall(draggedBall);
+                    if(oldTube) oldTube.balls.pop();
+                }
+                draggedBall = null;
+            });
+
+            // Listen for collisions to play sounds
+            Events.on(engine, 'collisionStart', (event) => {
+                if (!audioStarted) return;
+                const pairs = event.pairs;
+                for (let i = 0; i < pairs.length; i++) {
+                    const pair = pairs[i];
+                    const bodyA = pair.bodyA;
+                    const bodyB = pair.bodyB;
+                    
+                    // Play sound if two balls collide with enough force
+                    if (bodyA.label === 'ball' && bodyB.label === 'ball') {
+                        if (pair.collision.depth > 1) { // Threshold for significant collision
+                            collisionSound.triggerAttackRelease("C2", "8n", Tone.now());
+                        }
+                    }
+                }
+            });
+
+            // Run the physics engine
+            Engine.run(engine);
+        }
+
+        function draw() {
+            // Draw calming gradient background
+            drawGradientBackground();
+            
+            if (!gameWon) {
+                checkWinCondition();
+            }
+
+            // Draw Tubes (isometric style)
+            noStroke();
+            for (const tube of tubes) {
+                drawTube(tube.x, tube.y, tube.width, tube.height);
+            }
+
+            // Draw Balls and Shadows
+            for (const ball of balls) {
+                const pos = ball.position;
+                const color = ball.render.fillStyle;
+                
+                // Draw shadow
+                fill(0, 0, 0, 30);
+                ellipse(pos.x, pos.y + ball.circleRadius, ball.circleRadius * 2, ball.circleRadius * 0.5);
+
+                // Draw ball
+                fill(color);
+                ellipse(pos.x, pos.y, ball.circleRadius * 2);
+            }
+            
+            // Display Win Message
+            if (gameWon) {
+                textAlign(CENTER, CENTER);
+                textSize(64);
+                fill(255, 200);
+                text("PUZZLE SOLVED!", width / 2, height / 2);
+            }
+        }
+        
+        function mousePressed() {
+            if (!audioStarted) {
+                Tone.start();
+                ambientLoop.start(0);
+                audioStarted = true;
+                console.log("Audio context started.");
+            }
+        }
+
+        // --- Helper Functions ---
+
+        function setupAudio() {
+            // Soft "thud" for collisions
+            collisionSound = new Tone.MembraneSynth({
+                pitchDecay: 0.01,
+                octaves: 2,
+                envelope: { attack: 0.001, decay: 0.2, sustain: 0 },
+            }).toDestination();
+            collisionSound.volume.value = -12;
+
+            // Victory chime
+            victorySound = new Tone.Synth({
+                oscillator: { type: 'sine' },
+                envelope: { attack: 0.05, decay: 0.5, sustain: 0.1, release: 1 },
+            }).toDestination();
+            victorySound.volume.value = -6;
+
+            // Ambient background music loop
+            const ambientSynth = new Tone.AMSynth({
+                harmonicity: 1.5,
+                envelope: { attack: 0.1, decay: 1, sustain: 0.3, release: 2 },
+                modulationEnvelope: { attack: 0.5, decay: 0.1, sustain: 1, release: 0.5 }
+            }).toDestination();
+            ambientSynth.volume.value = -30;
+            
+            const melody = ["C3", "E3", "G3", "B3"];
+            let melodyIndex = 0;
+            ambientLoop = new Tone.Loop(time => {
+                ambientSynth.triggerAttackRelease(melody[melodyIndex % melody.length], "2n", time);
+                melodyIndex++;
+            }, "1n").start(0); // Start the loop to be played when Tone starts
+        }
+        
+        function drawGradientBackground() {
+            const color1 = color(173, 216, 230); // Soft Teal
+            const color2 = color(144, 238, 144); // Soft Green
+            for (let i = 0; i <= height; i++) {
+                const inter = map(i, 0, height, 0, 1);
+                const c = lerpColor(color1, color2, inter);
+                stroke(c);
+                line(0, i, width, i);
+            }
+            noStroke();
+        }
+
+        function drawTube(x, y, w, h) {
+            const tubeColor = color(220, 220, 210); // Neutral off-white
+            const tubeDarker = color(200, 200, 190);
+            const tubeOpeningHeight = 20;
+
+            // Back of the tube
+            fill(tubeColor);
+            rect(x - w / 2, y - h / 2, w, h, 10);
+
+            // Front shading for 2.5D effect
+            fill(tubeDarker);
+            rect(x - w / 2, y - h / 2, w, h, 10);
+            
+            // Opening Ellipse
+            fill(50, 30);
+            ellipse(x, y - h/2, w, tubeOpeningHeight);
+        }
+        
+        function getTubeOfBall(ball) {
+            for (const tube of tubes) {
+                if (tube.balls.includes(ball)) {
+                    return tube;
+                }
+            }
+            return null;
+        }
+
+        function isTopBall(ball, tube) {
+            const topBall = getTopBallInTube(tube);
+            return topBall === ball;
+        }
+
+        function getTopBallInTube(tube) {
+            if (tube.balls.length === 0) return null;
+            // Find the ball with the smallest y (highest on screen)
+            let topBall = tube.balls[0];
+            for (let i = 1; i < tube.balls.length; i++) {
+                if (tube.balls[i].position.y < topBall.position.y) {
+                    topBall = tube.balls[i];
+                }
+            }
+            return topBall;
+        }
+
+        function getTubeUnderMouse() {
+            for (const tube of tubes) {
+                if (mouseX > tube.x - tube.width / 2 && mouseX < tube.x + tube.width / 2 &&
+                    mouseY < tube.y + tube.height/2) {
+                    return tube;
+                }
+            }
+            return null;
+        }
+
+        function checkWinCondition() {
+            if (gameWon) return;
+
+            let sortedTubes = 0;
+            let totalBallsInTubes = 0;
+            
+            // Re-evaluate tube contents based on physics positions
+            let currentTubeContents = tubes.map(() => []);
+            for(const ball of balls) {
+                let inTube = false;
+                for(let i=0; i<tubes.length; i++) {
+                    const tube = tubes[i];
+                    if (ball.position.x > tube.x - tube.width / 2 && ball.position.x < tube.x + tube.width / 2 &&
+                        ball.position.y > tube.y - tube.height/2) {
+                        currentTubeContents[i].push(ball);
+                        inTube = true;
+                        break;
+                    }
+                }
+            }
+
+            for (const tubeContent of currentTubeContents) {
+                totalBallsInTubes += tubeContent.length;
+                if (tubeContent.length === 0) {
+                    sortedTubes++;
+                    continue;
+                }
+                if (tubeContent.length === TUBE_CAPACITY) {
+                    const firstColor = tubeContent[0].color;
+                    const allSameColor = tubeContent.every(b => b.color === firstColor);
+                    if (allSameColor) {
+                        sortedTubes++;
+                    }
+                }
+            }
+            
+            // Win if all tubes are sorted and no balls are on the floor
+            if (sortedTubes === TUBE_COUNT && totalBallsInTubes === balls.length) {
+                gameWon = true;
+                console.log("Game Won!");
+                // Play victory sound
+                victorySound.triggerAttackRelease("C4", "0.5s", Tone.now());
+                victorySound.triggerAttackRelease("E4", "0.5s", Tone.now() + 0.2);
+                victorySound.triggerAttackRelease("G4", "0.5s", Tone.now() + 0.4);
+
+                // Stop the physics to freeze the scene
+                Runner.stop(engine.runner);
+            }
+        }
+    </script>
 </body>
 </html>
