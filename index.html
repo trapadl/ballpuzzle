@@ -86,11 +86,12 @@
                     balls: []
                 });
                 
-                // Add static walls for each tube to contain balls
+                // Add static walls and a floor for each tube to contain balls
                 const wallThickness = 10;
                 World.add(world, [
                     Bodies.rectangle(x - tubeWidth / 2, tubeY, wallThickness, tubeHeight, { isStatic: true, render: { visible: false } }),
-                    Bodies.rectangle(x + tubeWidth / 2, tubeY, wallThickness, tubeHeight, { isStatic: true, render: { visible: false } })
+                    Bodies.rectangle(x + tubeWidth / 2, tubeY, wallThickness, tubeHeight, { isStatic: true, render: { visible: false } }),
+                    Bodies.rectangle(x, tubeY + tubeHeight / 2, tubeWidth, wallThickness, { isStatic: true, render: { visible: false } })
                 ]);
             }
             
